@@ -1,0 +1,125 @@
+name: Build & Publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v2.0.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    env:
+      ARCHIVE_NAME: op-cache-${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - name: Install Rust toolchain
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc' >> "$GITHUB_ENV"
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          mkdir "$ARCHIVE_NAME"
+          cp "target/${{ matrix.target }}/release/op-cache" "$ARCHIVE_NAME/"
+          tar czf "$ARCHIVE_NAME.tar.gz" "$ARCHIVE_NAME"
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.event.release.tag_name || inputs.tag }}
+        run: gh release upload "$TAG_NAME" "$ARCHIVE_NAME.tar.gz" --clobber
+
+  update-homebrew:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      TAG_NAME: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@v4
+        with:
+          repository: simlans/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Update Homebrew formula
+        env:
+          RELEASE_URL: https://github.com/simlans/op-cache/releases/download
+        run: |
+          SHA_DARWIN_ARM64=$(curl -sL "${RELEASE_URL}/${TAG_NAME}/op-cache-aarch64-apple-darwin.tar.gz" | shasum -a 256 | cut -d' ' -f1)
+          SHA_DARWIN_X86=$(curl -sL "${RELEASE_URL}/${TAG_NAME}/op-cache-x86_64-apple-darwin.tar.gz" | shasum -a 256 | cut -d' ' -f1)
+          SHA_LINUX_X86=$(curl -sL "${RELEASE_URL}/${TAG_NAME}/op-cache-x86_64-unknown-linux-gnu.tar.gz" | shasum -a 256 | cut -d' ' -f1)
+          SHA_LINUX_ARM64=$(curl -sL "${RELEASE_URL}/${TAG_NAME}/op-cache-aarch64-unknown-linux-gnu.tar.gz" | shasum -a 256 | cut -d' ' -f1)
+          VERSION="${TAG_NAME#v}"
+
+          mkdir -p homebrew-tap/Formula
+          cat > homebrew-tap/Formula/op-cache.rb <<FORMULA
+          class OpCache < Formula
+            desc "Fast cache for 1Password CLI reads"
+            homepage "https://github.com/simlans/op-cache"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "${RELEASE_URL}/${TAG_NAME}/op-cache-aarch64-apple-darwin.tar.gz"
+                sha256 "${SHA_DARWIN_ARM64}"
+              else
+                url "${RELEASE_URL}/${TAG_NAME}/op-cache-x86_64-apple-darwin.tar.gz"
+                sha256 "${SHA_DARWIN_X86}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "${RELEASE_URL}/${TAG_NAME}/op-cache-aarch64-unknown-linux-gnu.tar.gz"
+                sha256 "${SHA_LINUX_ARM64}"
+              else
+                url "${RELEASE_URL}/${TAG_NAME}/op-cache-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "${SHA_LINUX_X86}"
+              end
+            end
+
+            def install
+              bin.install "op-cache"
+            end
+          end
+          FORMULA
+
+      - name: Push formula
+        working-directory: homebrew-tap
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/op-cache.rb
+          git commit -m "op-cache ${TAG_NAME}"
+          git push

@@ -1,6 +1,6 @@
 [package]
 name = "op-cache"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "A fast caching proxy for 1Password CLI op read commands"
 license = "MIT"

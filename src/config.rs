@@ -80,4 +80,9 @@ impl Config {
     pub fn log_path(&self) -> PathBuf {
         self.socket_path.with_extension("log")
     }
+
+    pub fn temp_file_dir(&self) -> PathBuf {
+        let tmp_base = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
+        PathBuf::from(tmp_base).join("op-cache-fs")
+    }
 }

@@ -5,6 +5,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 pub enum Request {
     Get { key: String },
     Set { key: String, value: String },
+    GetFile { key: String },
+    SetFile { key: String, path: String },
     Ping,
     ClearCache,
     GetStats,
@@ -16,6 +18,8 @@ pub enum Response {
     Hit { value: String },
     Miss,
     Stored,
+    FileHit { path: String },
+    FileStored,
     Pong,
     CacheCleared,
     Stats(CacheStats),

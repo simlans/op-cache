@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{bail, Result};
@@ -24,8 +25,38 @@ pub fn collect_op_refs(env: &[(String, String)]) -> Vec<&str> {
         .collect()
 }
 
+/// Check if a reference should be treated as a file (ends with /config or similar)
+pub fn is_file_reference(reference: &str) -> bool {
+    // Check for common file-like suffixes
+    let path = PathBuf::from(reference);
+    match path.extension() {
+        Some(ext) => {
+            matches!(
+                ext.to_str(),
+                Some("conf")
+                    | Some("cfg")
+                    | Some("ini")
+                    | Some("toml")
+                    | Some("yaml")
+                    | Some("yml")
+                    | Some("json")
+                    | Some("pem")
+                    | Some("crt")
+                    | Some("key")
+                    | Some("cert")
+            )
+        }
+        None => {
+            // Check for /config suffix
+            reference.ends_with("/config")
+                || reference.ends_with("/kubeconfig")
+                || reference.ends_with("/credentials")
+        }
+    }
+}
+
 /// Resolves all op:// references concurrently (bounded) through the cache.
-/// Returns a map from reference string to resolved value.
+/// Returns a map from reference string to resolved value or file path.
 pub async fn resolve_refs(
     client: &Client,
     refs: &[&str],
@@ -33,8 +64,15 @@ pub async fn resolve_refs(
 ) -> Result<HashMap<String, String>> {
     let results: Vec<_> = stream::iter(refs.iter().copied())
         .map(|reference| async move {
-            let result = client.read(reference, account).await;
-            (reference, result)
+            if is_file_reference(reference) {
+                // For file references, we need to return the temp path
+                let result = client.read_file(reference, account).await;
+                (reference, result)
+            } else {
+                // For value references, use normal read
+                let result = client.read(reference, account).await;
+                (reference, result)
+            }
         })
         .buffer_unordered(MAX_CONCURRENT_READS)
         .collect()
@@ -200,5 +238,30 @@ mod tests {
         let resolved = HashMap::new();
         let result = build_env(&env, &resolved);
         assert_eq!(result[0], ("X".into(), "op://vault/x".into()));
+    }
+
+    #[test]
+    fn is_file_reference_detects_kubeconfig() {
+        assert!(is_file_reference("op://platform-ops/nautilus-kubeconfig/config"));
+    }
+
+    #[test]
+    fn is_file_reference_detects_config_suffix() {
+        assert!(is_file_reference("op://vault/item/config"));
+        assert!(is_file_reference("op://vault/item/kubeconfig"));
+    }
+
+    #[test]
+    fn is_file_reference_detects_extensions() {
+        assert!(is_file_reference("op://vault/item/key.pem"));
+        assert!(is_file_reference("op://vault/item/cert.crt"));
+        assert!(is_file_reference("op://vault:item/config.yaml"));
+    }
+
+    #[test]
+    fn is_file_reference_not_for_secrets() {
+        assert!(!is_file_reference("op://vault/item/password"));
+        assert!(!is_file_reference("op://vault/item/token"));
+        assert!(!is_file_reference("op://vault/item/field"));
     }
 }

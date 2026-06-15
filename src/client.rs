@@ -150,6 +150,61 @@ impl Client {
             _ => Err(Error::Protocol("unexpected response".to_string())),
         }
     }
+
+    /// Read a file from 1Password, storing it in a temp location and caching the path
+    pub async fn read_file(&self,
+        reference: &str,
+        account: Option<&str>,
+    ) -> Result<String, Error> {
+        // Validate reference format
+        if !reference.starts_with("op://") {
+            return Err(Error::InvalidReference(format!(
+                "reference must start with 'op://': {}",
+                reference
+            )));
+        }
+
+        // Ensure daemon is running
+        ensure_daemon_running(&self.config)?;
+
+        let effective = Self::effective_account(account);
+        let key = Self::cache_key(reference, effective.as_deref());
+
+        // Check cache first for file path
+        let response = self.send_request(Request::GetFile { key: key.clone() }).await?;
+
+        match response {
+            Response::FileHit { path } => Ok(path),
+            Response::Miss => {
+                // Cache miss - execute op read and save to temp file
+                let content = self.execute_op_read(reference, effective.as_deref()).await?;
+                
+                // Create temp file
+                let tmp_dir = self.config.temp_file_dir();
+                std::fs::create_dir_all(&tmp_dir).map_err(|e| Error::Internal(format!("failed to create temp dir: {}", e)))?;
+                
+                let mut temp_file = tempfile::Builder::new()
+                    .prefix("op-cache-")
+                    .suffix(&format!("-{}", key.chars().take(8).collect<String>()))
+                    .tempfile_in(&tmp_dir)
+                    .map_err(|e| Error::Internal(format!("failed to create temp file: {}", e)))?;
+                
+                // Write content to temp file
+                std::io::Write::write_all(&mut temp_file, content.as_bytes())
+                    .map_err(|e| Error::Internal(format!("failed to write temp file: {}", e)))?;
+                
+                let path = temp_file.into_temp_path()
+                    .to_string_lossy()
+                    .to_string();
+                
+                // Store file path in cache
+                let _ = self.send_request(Request::SetFile { key, path: path.clone() }).await;
+                
+                Ok(path)
+            }
+            _ => Err(Error::Protocol("unexpected response".to_string())),
+        }
+    }
 }
 
 #[cfg(test)]

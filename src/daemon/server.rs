@@ -150,6 +150,17 @@ async fn handle_request(request: &Request, cache: &Cache) -> Response {
             cache.insert(key, value.clone()).await;
             Response::Stored
         }
+        Request::GetFile { key } => {
+            if let Some((path, _)) = cache.get_file(key).await {
+                Response::FileHit { path }
+            } else {
+                Response::Miss
+            }
+        }
+        Request::SetFile { key, path } => {
+            cache.insert_file(key, path.clone()).await;
+            Response::FileStored
+        }
         Request::Ping => Response::Pong,
         Request::ClearCache => {
             cache.clear();
